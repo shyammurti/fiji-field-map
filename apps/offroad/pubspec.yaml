@@ -1,7 +1,7 @@
 name: offroad
 description: Offline trail maps for Fiji.
 publish_to: none
-version: 0.3.0+5
+version: 0.3.1+6
 environment:
   sdk: ^3.10.0
 dependencies:

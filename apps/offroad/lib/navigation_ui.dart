@@ -1,10 +1,13 @@
 import 'dart:async';
+import 'dart:math' as math;
 
-import 'package:latlong2/latlong.dart';
+import 'package:latlong2/latlong.dart' hide Path;
 import 'package:material_ui/material_ui.dart';
 import 'package:offroad_core/position.dart';
 import 'package:offroad_core/trails.dart';
 import 'package:offroad_storage/road_index.dart';
+
+import 'position_panel.dart';
 
 String formatDistance(double m) =>
     m >= 1000 ? '${(m / 1000).toStringAsFixed(1)} km' : '${m.round()} m';
@@ -230,6 +233,184 @@ class NavHudBar extends StatelessWidget {
             child: const Text('End'),
           ),
         ],
+      ),
+    );
+  }
+}
+
+/// Directional navigation puck showing current travel/compass heading on the map.
+class DirectionPuck extends StatelessWidget {
+  const DirectionPuck({
+    super.key,
+    required this.live,
+    required this.headingDeg,
+  });
+
+  final bool live;
+  final double? headingDeg;
+
+  @override
+  Widget build(BuildContext context) {
+    final fill = live ? const Color(0xff005aba) : Colors.grey.shade700;
+    if (headingDeg == null) {
+      return Center(
+        child: Container(
+          width: 24,
+          height: 24,
+          decoration: BoxDecoration(
+            color: fill,
+            shape: BoxShape.circle,
+            border: Border.all(color: Colors.white, width: 3),
+            boxShadow: const [
+              BoxShadow(color: Color(0x55000000), blurRadius: 5),
+            ],
+          ),
+        ),
+      );
+    }
+    return Transform.rotate(
+      angle: headingDeg! * math.pi / 180,
+      child: Stack(
+        alignment: Alignment.center,
+        children: [
+          CustomPaint(
+            size: const Size(56, 56),
+            painter: _HeadingConePainter(fill),
+          ),
+          Container(
+            width: 30,
+            height: 30,
+            decoration: BoxDecoration(
+              color: fill,
+              shape: BoxShape.circle,
+              border: Border.all(color: Colors.white, width: 2.5),
+              boxShadow: const [
+                BoxShadow(color: Color(0x66000000), blurRadius: 5),
+              ],
+            ),
+            child: const Icon(
+              Icons.navigation_rounded,
+              color: Colors.white,
+              size: 19,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _HeadingConePainter extends CustomPainter {
+  const _HeadingConePainter(this.color);
+  final Color color;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final center = Offset(size.width / 2, size.height / 2);
+    final radius = size.width / 2;
+    final paint = Paint()
+      ..shader = RadialGradient(
+        colors: [color.withAlpha(115), color.withAlpha(0)],
+      ).createShader(Rect.fromCircle(center: center, radius: radius));
+    final path = Path()
+      ..moveTo(center.dx, center.dy)
+      ..arcTo(
+        Rect.fromCircle(center: center, radius: radius),
+        -math.pi / 2 - 0.55,
+        1.1,
+        false,
+      )
+      ..close();
+    canvas.drawPath(path, paint);
+  }
+
+  @override
+  bool shouldRepaint(_HeadingConePainter old) => old.color != color;
+}
+
+/// Slim single-line GPS tray bar shown when the phone details drawer is collapsed.
+class CollapsedGpsBar extends StatelessWidget {
+  const CollapsedGpsBar({
+    super.key,
+    required this.state,
+    required this.onExpand,
+    required this.onLocate,
+    required this.onSettings,
+  });
+
+  final PositionState state;
+  final VoidCallback onExpand;
+  final VoidCallback onLocate;
+  final VoidCallback onSettings;
+
+  @override
+  Widget build(BuildContext context) {
+    final fix = state.fix;
+    final colors = Theme.of(context).colorScheme;
+    final active = {
+      FixStatus.live,
+      FixStatus.stale,
+      FixStatus.searching,
+    }.contains(state.status);
+    final acc = fix?.accuracy != null ? ' · ±${fix!.accuracy!.round()} m' : '';
+    final label = '${statusText[state.status]!}$acc';
+    return GestureDetector(
+      onTap: onExpand,
+      onVerticalDragEnd: (d) {
+        if ((d.primaryVelocity ?? 0) < -120) onExpand();
+      },
+      child: Material(
+        color: colors.surfaceContainerLow,
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+          child: Row(
+            children: [
+              Icon(
+                state.status == FixStatus.manual
+                    ? Icons.place_outlined
+                    : Icons.gps_fixed,
+                size: 18,
+                color: colors.primary,
+              ),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text(
+                  label,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(
+                    fontSize: 13,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+              ),
+              if (!active)
+                TextButton(
+                  onPressed:
+                      state.status == FixStatus.disabled ||
+                          state.status == FixStatus.blocked
+                      ? onSettings
+                      : onLocate,
+                  style: TextButton.styleFrom(
+                    visualDensity: VisualDensity.compact,
+                    padding: const EdgeInsets.symmetric(horizontal: 8),
+                  ),
+                  child: Text(
+                    state.status == FixStatus.disabled ||
+                            state.status == FixStatus.blocked
+                        ? 'Settings'
+                        : 'GPS',
+                  ),
+                ),
+              IconButton(
+                tooltip: 'Show GPS details',
+                visualDensity: VisualDensity.compact,
+                onPressed: onExpand,
+                icon: const Icon(Icons.keyboard_arrow_up_rounded),
+              ),
+            ],
+          ),
+        ),
       ),
     );
   }

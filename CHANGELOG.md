@@ -2,6 +2,14 @@
 
 All notable changes to **Fiji Field Map** are documented here.
 
+## [0.3.1] - 2026-11-26
+
+### Improved
+- **Live driving direction arrow & Heading-Up mode**: Replaced the static position dot with a rotated directional navigation puck (`DirectionPuck`) and forward heading cone using live GPS course (with movement-bearing calculation, compass fallback, and initial route direction before moving). Starting navigation now automatically engages **Heading-Up** map rotation, and Android GPS updates run at 1-second intervals for smoother driving tracking.
+- **Push-down & auto-hiding bottom GPS tray**: On phones, the bottom GPS details drawer now starts collapsed as a slim single-line bar (tap or swipe up to expand, tap or swipe down to push down) and hides completely during active navigation for a full-screen driving view.
+
+---
+
 ## [0.3.0] - 2026-11-26
 
 ### Added

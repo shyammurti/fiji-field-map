@@ -24,7 +24,7 @@ class DevicePosition implements PositionSource {
         ? AndroidSettings(
             accuracy: LocationAccuracy.high,
             forceLocationManager: true,
-            intervalDuration: const Duration(seconds: 3),
+            intervalDuration: const Duration(seconds: 1),
             distanceFilter: 0,
           )
         : const LocationSettings(accuracy: LocationAccuracy.high);

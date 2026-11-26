@@ -65,9 +65,11 @@ class _MapScreenState extends ConsumerState<MapScreen>
   final map = MapController();
   final desktop = !Platform.isAndroid && !Platform.isIOS;
   bool ready = false, follow = false, compass = false, picking = false;
-  bool zoomedIn = false, outside = false;
+  bool zoomedIn = false, outside = false, panelExpanded = false;
   bool resumeGps = false, zoomOnFix = false, satellite = false, busy = false;
   bool connectToRoad = true;
+  double? _travelHeading;
+  LatLng? _prevFixPoint;
   TrailSession? get field => widget.project.field;
   List<RoadLine> detail = [];
   List<Polyline> _roadPolylines = const [];
@@ -267,6 +269,39 @@ class _MapScreenState extends ConsumerState<MapScreen>
     map.move(map.camera.center, (map.camera.zoom + change).clamp(5, 20));
   }
 
+  double? _effectiveHeading(PositionState state) {
+    final fix = state.fix;
+    if (fix != null &&
+        fix.speed != null &&
+        fix.speed! >= 1.0 &&
+        fix.course != null) {
+      return fix.course;
+    }
+    if (state.compass != null) return state.compass;
+    if (_travelHeading != null) return _travelHeading;
+    if (activePath != null && fix != null) {
+      return guide(activePath!, LatLng(fix.lat, fix.lon)).bearingDeg;
+    }
+    return null;
+  }
+
+  void _updateTravelHeading(Fix fix) {
+    final pt = LatLng(fix.lat, fix.lon);
+    if (fix.speed != null && fix.speed! >= 0.8 && fix.course != null) {
+      _travelHeading = fix.course;
+      _prevFixPoint = pt;
+      return;
+    }
+    if (_prevFixPoint == null) {
+      _prevFixPoint = pt;
+      return;
+    }
+    if (meters(_prevFixPoint!, pt) >= 5) {
+      _travelHeading = bearing(_prevFixPoint!, pt);
+      _prevFixPoint = pt;
+    }
+  }
+
   @override
   void initState() {
     super.initState();
@@ -275,8 +310,9 @@ class _MapScreenState extends ConsumerState<MapScreen>
     _positionSub = ref.listenManual(positionProvider, (_, next) {
       final value = next.asData?.value;
       if (value != null) {
-        if (value.status == FixStatus.live) {
-          eta.recordSpeed(value.fix?.speed);
+        if (value.status == FixStatus.live && value.fix != null) {
+          eta.recordSpeed(value.fix!.speed);
+          _updateTravelHeading(value.fix!);
         }
         _center(value);
         reroute(value);
@@ -333,7 +369,7 @@ class _MapScreenState extends ConsumerState<MapScreen>
     final fix = state.fix;
     final valid =
         state.status == FixStatus.live || state.status == FixStatus.manual;
-    final bearing = compass && valid ? state.compass : null;
+    final heading = compass && valid ? _effectiveHeading(state) : null;
     final center = follow && valid && fix != null
         ? LatLng(fix.lat, fix.lon)
         : map.camera.center;
@@ -341,7 +377,7 @@ class _MapScreenState extends ConsumerState<MapScreen>
       map.moveAndRotate(
         center,
         zoomOnFix && valid ? math.max(16, map.camera.zoom) : map.camera.zoom,
-        bearing == null ? 0 : -bearing,
+        heading == null ? 0 : -heading,
       );
       if (valid) zoomOnFix = false;
     }
@@ -1231,18 +1267,21 @@ class _MapScreenState extends ConsumerState<MapScreen>
       if (!mounted) return;
       path = [...approach, ...p.skip(1)];
     }
+    final driveApproach = choice.endsWith('/drive');
     eta.reset();
     setState(() {
       activeTrailId = selected.id;
       activeName = selected.name;
       activePath = path;
-      approachTo = choice.endsWith('/drive') ? p : null;
+      approachTo = driveApproach ? p : null;
       rerouteGoal = null;
       navStart = null;
       navDest = null;
       offFixes = 0;
-      follow = false;
-      compass = false;
+      panelExpanded = false;
+      follow = driveApproach;
+      zoomOnFix = driveApproach;
+      compass = driveApproach && !desktop;
     });
     showPath(path);
     if (!desktop && ref.read(trackerProvider).state.status != FixStatus.live) {
@@ -1616,9 +1655,10 @@ class _MapScreenState extends ConsumerState<MapScreen>
         approachTo = null;
         rerouteGoal = navDest;
         offFixes = 0;
+        panelExpanded = false;
         follow = navUseGpsStart;
         zoomOnFix = navUseGpsStart;
-        compass = false;
+        compass = navUseGpsStart && !desktop;
       });
       if (!navUseGpsStart) {
         showPath(previewPath!);
@@ -1660,12 +1700,16 @@ class _MapScreenState extends ConsumerState<MapScreen>
                 } else {
                   setState(() {
                     follow = true;
+                    compass = !desktop;
                     zoomOnFix = true;
                   });
                   _center(state);
                 }
               },
-              onEnd: _endNavigation,
+              onEnd: () {
+                _endNavigation();
+                if (ready) map.rotate(0);
+              },
             ),
           if (busy) const LinearProgressIndicator(),
           if (reviewed != null)
@@ -1874,12 +1918,40 @@ class _MapScreenState extends ConsumerState<MapScreen>
         child: LayoutBuilder(
           builder: (context, size) {
             final wide = size.maxWidth >= 780;
+            Future<void> openGpsSettings(FixStatus status) async {
+              try {
+                if (await DevicePosition().openSettings(status)) {
+                  return;
+                }
+              } catch (_) {
+                /* Some desktop adapters have no settings shortcut. */
+              }
+              if (context.mounted) {
+                ScaffoldMessenger.of(context).showSnackBar(
+                  const SnackBar(
+                    content: Text(
+                      'Open location permissions in system settings.',
+                    ),
+                  ),
+                );
+              }
+            }
+
             final panel = Consumer(
               builder: (context, ref, _) {
                 final tracker = ref.watch(trackerProvider);
                 final state =
                     ref.watch(positionProvider).asData?.value ?? tracker.state;
-                return PositionPanel(
+                if (!wide && !panelExpanded) {
+                  if (activePath != null) return const SizedBox.shrink();
+                  return CollapsedGpsBar(
+                    state: state,
+                    onExpand: () => setState(() => panelExpanded = true),
+                    onLocate: _locate,
+                    onSettings: () => openGpsSettings(state.status),
+                  );
+                }
+                final content = PositionPanel(
                   state: state,
                   desktop: desktop,
                   wide: wide,
@@ -1893,24 +1965,52 @@ class _MapScreenState extends ConsumerState<MapScreen>
                     });
                   },
                   onManual: () => setState(() => picking = !picking),
-                  onSettings: () async {
-                    try {
-                      if (await DevicePosition().openSettings(state.status)) {
-                        return;
-                      }
-                    } catch (_) {
-                      /* Some desktop adapters have no settings shortcut. */
-                    }
-                    if (context.mounted) {
-                      ScaffoldMessenger.of(context).showSnackBar(
-                        const SnackBar(
-                          content: Text(
-                            'Open location permissions in system settings.',
-                          ),
-                        ),
-                      );
+                  onSettings: () => openGpsSettings(state.status),
+                );
+                if (wide) return content;
+                return GestureDetector(
+                  onVerticalDragEnd: (d) {
+                    if ((d.primaryVelocity ?? 0) > 120) {
+                      setState(() => panelExpanded = false);
                     }
                   },
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      InkWell(
+                        onTap: () => setState(() => panelExpanded = false),
+                        child: Padding(
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 12,
+                            vertical: 2,
+                          ),
+                          child: Row(
+                            mainAxisAlignment: MainAxisAlignment.center,
+                            children: [
+                              Container(
+                                width: 34,
+                                height: 4,
+                                margin: const EdgeInsets.only(right: 8),
+                                decoration: BoxDecoration(
+                                  color: Theme.of(context).colorScheme.outline,
+                                  borderRadius: BorderRadius.circular(2),
+                                ),
+                              ),
+                              const Icon(
+                                Icons.keyboard_arrow_down_rounded,
+                                size: 20,
+                              ),
+                              const Text(
+                                'Hide GPS panel',
+                                style: TextStyle(fontSize: 12),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ),
+                      Expanded(child: content),
+                    ],
+                  ),
                 );
               },
             );
@@ -1919,13 +2019,15 @@ class _MapScreenState extends ConsumerState<MapScreen>
               verticalDirection: VerticalDirection.up,
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
-                SizedBox(
-                  width: wide ? 294 : null,
-                  height: wide
-                      ? null
-                      : (size.maxHeight * .34).clamp(136, 210).toDouble(),
-                  child: panel,
-                ),
+                if (wide)
+                  SizedBox(width: 294, child: panel)
+                else if (panelExpanded)
+                  SizedBox(
+                    height: (size.maxHeight * .32).clamp(146, 224).toDouble(),
+                    child: panel,
+                  )
+                else
+                  panel,
                 Expanded(
                   child: Stack(
                     children: [
@@ -2030,24 +2132,17 @@ class _MapScreenState extends ConsumerState<MapScreen>
                                     markers: [
                                       Marker(
                                         point: LatLng(fix.lat, fix.lon),
-                                        width: 32,
-                                        height: 32,
+                                        width: 56,
+                                        height: 56,
                                         child: Semantics(
                                           label: live
                                               ? 'Position'
                                               : 'Last known position',
-                                          child: Icon(
-                                            Icons.adjust,
-                                            size: 32,
-                                            shadows: const [
-                                              Shadow(
-                                                color: Colors.white,
-                                                blurRadius: 4,
-                                              ),
-                                            ],
-                                            color: live
-                                                ? const Color(0xff0052a1)
-                                                : Colors.grey.shade700,
+                                          child: DirectionPuck(
+                                            live: live,
+                                            headingDeg: _effectiveHeading(
+                                              state,
+                                            ),
                                           ),
                                         ),
                                       ),
@@ -2220,11 +2315,9 @@ class _MapScreenState extends ConsumerState<MapScreen>
                                     return IconButton(
                                       tooltip: compass
                                           ? 'North up'
-                                          : 'Compass up',
+                                          : 'Heading up',
                                       isSelected: compass,
-                                      onPressed:
-                                          (!live || state.compass == null) &&
-                                              !compass
+                                      onPressed: !live && !compass
                                           ? null
                                           : () {
                                               setState(

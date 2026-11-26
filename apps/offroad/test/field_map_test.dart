@@ -86,6 +86,14 @@ void main() {
     tester.view.physicalSize = const Size(390, 780);
     await tester.pump();
     expect(find.byType(FlutterMap), findsOneWidget);
+    // On narrow phone screens the GPS details tray starts collapsed and can expand/hide.
+    expect(find.byTooltip('Show GPS details'), findsOneWidget);
+    await tester.tap(find.byTooltip('Show GPS details'));
+    await tester.pump();
+    expect(find.text('Hide GPS panel'), findsOneWidget);
+    await tester.tap(find.text('Hide GPS panel'));
+    await tester.pump();
+    expect(find.byTooltip('Show GPS details'), findsOneWidget);
     expect(tester.takeException(), isNull);
     await tester.pumpWidget(const SizedBox());
   });
