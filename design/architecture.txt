@@ -1,0 +1,142 @@
+Offline off-road navigation | Proposed architecture | Step 1
+
+Phone: map with glove-sized controls          Laptop: map with resizable panels
+           +--------------- Flutter / Riverpod ---------------+
+                                 |
+                   commands in / observable state out
+                                 |
+                   Pure Dart core and repository ports
+          editing, recording policy, routing, navigation, merge
+                                 |
+            +--------------------+----------------------+
+            |                    |                      |
+     Drift / native SQLite   Position sources       Data exchange
+     per-device project DB   Android GNSS/service    ZIP, GPX, KML, GeoJSON
+     photos by hash          OS / manual / replay   paired local peers
+            |
+     Roads, points, waypoints, routes, revisions
+     R-tree and routing graph derived from road geometry
+
+Map rendering: flutter_map reads its own offline raster TileProvider. It reads
+verified MBTiles independently of the editable project database. Flutter draws
+the vector roads, routes, markers and position above those tiles. Bundle a Fiji
+OSM-derived starter basemap spanning the antimeridian and attribution for first launch. Show a coverage
+indicator when detailed tiles are missing. Day/night themes use local overlays,
+UI colors and a night tileset or luminance treatment for a day-only raster.
+
+Proposed source tree under /mnt/media4/offroad-nav/
+  design/                         This proposal and schema.sql
+  apps/offroad/lib/
+    main.dart                     Composition root and capability detection
+    shell/                        Phone tabs, desktop panels, input bindings
+    features/                     Map, recorder, roads, editor, waypoints,
+                                  regions, navigation, settings, I/O and sync
+  apps/offroad/{android,windows,macos,linux}/
+                                  Native runners, permissions, service host
+  packages/core/lib/              Domain types, port interfaces, use cases,
+                                  geometry, edit history, guidance, merge rules
+  packages/storage/lib/           Drift DAOs, migrations, spatial queries,
+                                  asset inventory, raw fix journal
+  packages/platform/lib/          Position, heading, recorder lifecycle,
+                                  picker, print and local discovery adapters
+  packages/maps/lib/              Tile reader, downloader, import validation
+  packages/exchange/lib/          Format and package codecs, LAN transport
+  tests/fixtures/                 Offline map, topology, GPS and sync fixtures
+
+Storage layout. Give each device an installation UUID outside all projects.
+Each local project directory contains project.sqlite, maps/, blobs/ and staging/.
+Relative paths and UUIDs make transfers independent of OS paths. media4 holds
+the homelab workspace and its local datasets. Field devices own independent
+copies in writable app storage. No server participates in field operation.
+Database transactions govern visibility. For files, stage, verify, flush and
+rename on the same volume before publishing references. On startup reconcile
+incomplete region jobs and reclaim orphaned files after checking live, pending
+and historical references. Transfer logical records and blobs using a consistent
+database read snapshot. Never copy a live SQLite file to sync devices.
+
+Editing. Commands implement add/move/insert/delete, split, merge and snap.
+A completed gesture commits geometry, bounds, history, change group and graph
+invalidation together. Autosave a drawing draft as a road with fewer than two
+vertices until it can contribute an edge. Multi-select acts on one command
+group. Undo or redo issues a new revision; recheck expected versions after
+incoming edits. Desktop shortcuts, touch tools and context menus all call
+these same commands. Simplify viewport geometry on a worker using a zoom-
+dependent Douglas-Peucker tolerance. Use full geometry for editing, exports,
+navigation, distance and elevation profiles.
+
+Location. A common position stream distinguishes live, stale, lost, disabled
+and permission denied, plus manual and simulated sources. Track course and
+device compass heading have separate validity and timestamps. Offer north-up,
+follow and heading-up. Android owns the recording subscription in a location
+foreground service started from a visible action, with persistent notification.
+Declare coarse/fine location, FOREGROUND_SERVICE and FOREGROUND_SERVICE_LOCATION
+as applicable to the target SDK. Request precise location for trail recording.
+Separate always-on background access is needed only for flows that require
+starting location access from the background. Respect OS restrictions on
+restarts. Request slower updates when stationary or in low-power mode and
+faster updates during motion/guidance. Commit each accepted fix with its
+journal sequence and part before advertising it as saved. If storage fails,
+surface the error and last saved time. Recover interrupted sessions after a
+kill, then resume into a new part. Samples during process death are a gap.
+Desktop probes OS location and also accepts a map click or timed GPX replay.
+
+Maps. Initial import supports raster PNG/JPEG MBTiles. Inspect metadata,
+tile samples, schema, bounds, zooms and attribution. Detect vector PBF and
+explain the raster requirement. Translate XYZ row y to TMS (2^z - 1 - y).
+For a drawn box, split wrapped longitudes, clip to Web Mercator, count unique
+tile keys at each zoom and multiply by a per-zoom mean byte size. Show range,
+tile count and disk headroom before download. Use a self-hosted OSM-derived
+source or another source explicitly permitting offline acquisition. Bundle or
+copy packs by file when offline. Build a staging MBTiles file, resume by tile
+key and publish only after verification. Deletion first marks the registry
+entry, closes readers, then removes the file and finalizes the row.
+
+Routing. Shared junction IDs describe actual intersections; level-separated
+crossings stay disconnected. Imports retain topology, direction and access
+where supplied. Geometry-only imports require explicit snapping or confirmed
+junctions at ambiguous crossings. Build directed edges between junctions and
+part endpoints. Publish a complete graph revision atomically. Snap a start
+and destination to accessible segments and create temporary graph nodes for
+partial-edge costs. Run A* with a geodesic lower bound for distance or distance
+divided by maximum profile speed for time. Report disconnected destinations.
+Derive maneuvers, remaining distance, bearing and profile-based ETA from the
+route geometry. Re-route after sustained deviation outside an accuracy-aware
+corridor. Reverse recorded parts for retrace and mark gaps. Elevation comes
+from recorded/imported point heights; show gaps when unavailable. Side-by-side
+views, elevation charts and PDF/image export consume the same saved snapshot.
+
+Transfer. Project ZIP contains a versioned manifest, GeoJSON, GPX, metadata
+with identity/topology/revisions/tombstones, and checksummed photo blobs.
+Portable GPX/KML/GeoJSON alone can import as new data. A project package
+retains identity across round trips. mDNS advertises a local service; pair
+devices by confirming a fingerprint or code and exchange authenticated
+manifests/blobs over a local encrypted connection. Stage then preview added,
+modified, deleted and conflicting groups. A vector that dominates can advance
+a record; incomparable vectors retain both versions, including delete/edit.
+Preview related road, junction and photo edits together. Revalidate the local
+heads when applying and commit selected complete groups atomically. Advance a
+peer cursor only for contiguous incorporated changes. A repeated operation
+UUID is idempotent. A conflict resolution cites both inputs and advances the
+joined version vector. Retain tombstones and conflict payloads for offline
+peers. Optional cloud transport can reuse this protocol and offer timestamp
+resolution as an explicit policy. Device clocks alone do not establish causality.
+
+Library choices. Flutter shares rendering and input handling across four native
+targets. flutter_map supports a custom offline TileProvider. Riverpod connects
+reactive Drift queries and device capabilities to widgets. Drift supplies typed
+queries, transactions, migrations and background database execution. SQLite's
+R-tree supports viewport and snapping candidates followed by an exact geometry
+test. The sqlite3 Dart binding also reads MBTiles on a worker. geolocator wraps
+native position permissions and fixes. Keep platform printing, sensors and
+service lifecycle behind adapters. Choose individual codec and discovery
+plugins when implementing their milestones and validating target OS support.
+
+References
+https://docs.fleaflet.dev/layers/raster-tile-layer/tile-providers
+https://drift.simonbinder.eu/platforms/vm/
+https://sqlite.org/rtree.html
+https://github.com/mapbox/mbtiles-spec/blob/master/1.3/spec.md
+https://operations.osmfoundation.org/policies/tiles/
+https://riverpod.dev/
+https://pub.dev/packages/geolocator
+https://developer.android.com/develop/background-work/services/fgs/service-types

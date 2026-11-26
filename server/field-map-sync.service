@@ -1,0 +1,20 @@
+[Unit]
+Description=Fiji Field Map private route sync
+RequiresMountsFor=/mnt/media4
+After=network.target
+[Service]
+User=www-data
+Group=www-data
+WorkingDirectory=/mnt/media4/offroad-nav/server
+RuntimeDirectory=field-map-sync
+UMask=0077
+Environment=PYTHONDONTWRITEBYTECODE=1
+ExecStart=/usr/bin/gunicorn --workers 2 --umask 0077 --bind unix:/run/field-map-sync/sync.sock sync:application
+Restart=on-failure
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/mnt/media4/field-map-data
+NoNewPrivileges=true
+[Install]
+WantedBy=multi-user.target

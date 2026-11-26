@@ -1,0 +1,11 @@
+name: offroad_platform
+publish_to: none
+environment:
+  sdk: ^3.10.0
+dependencies:
+  flutter:
+    sdk: flutter
+  flutter_compass: ^0.8.1
+  geolocator: ^14.1.2
+  offroad_core:
+    path: ../core

@@ -1,0 +1,10 @@
+name: offroad_core
+description: Offline navigation domain logic.
+publish_to: none
+environment:
+  sdk: ^3.10.0
+dependencies:
+  latlong2: ^0.10.0
+  uuid: ^4.6.0
+dev_dependencies:
+  test: ^1.26.0

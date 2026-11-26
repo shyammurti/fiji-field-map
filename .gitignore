@@ -1,0 +1,16 @@
+.dart_tool/
+build/
+.flutter-plugins-dependencies
+*.jks
+*.p12
+key.properties
+local.properties
+.gradle/
+.kotlin/
+**/ephemeral/
+**/__pycache__/
+*.pyc
+releases/*.apk
+releases/*.tmp
+apps/offroad/assets/fiji-roads.sqlite
+apps/offroad/assets/fiji-satellite.mbtiles

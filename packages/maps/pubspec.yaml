@@ -1,0 +1,10 @@
+name: offroad_maps
+publish_to: none
+environment:
+  sdk: ^3.10.0
+dependencies:
+  flutter:
+    sdk: flutter
+  flutter_map: ^8.3.2
+  flutter_map_mbtiles: ^1.1.0
+  sqlite3: ^3.9.0
