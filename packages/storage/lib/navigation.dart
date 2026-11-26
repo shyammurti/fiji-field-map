@@ -1,6 +1,7 @@
 import 'dart:convert';
 import 'dart:io';
 import 'dart:isolate';
+import 'dart:math' as math;
 import 'package:collection/collection.dart';
 import 'package:latlong2/latlong.dart';
 import 'package:offroad_core/trails.dart';
@@ -140,11 +141,12 @@ class _Graph {
   }
 
   PathPart route(LatLng from, LatLng to) {
-    final a = nearest(from, 80), b = nearest(to, 80);
-    if (a == null || b == null)
+    final a = nearest(from, 250), b = nearest(to, 250);
+    if (a == null || b == null) {
       throw StateError(
-        'No connected road within 80 m of the position or trail entrance.',
+        'No connected road within 250 m of the start or destination.',
       );
+    }
     final start = --serial, goal = --serial;
     attach(start, from, a);
     attach(goal, to, b);
@@ -156,6 +158,8 @@ class _Graph {
         positions = <int, LatLng>{start: from};
     queue.add((id: start, g: 0.0, f: 0.0));
     final lookup = db.prepare('SELECT dst,lat,lon,cost FROM edges WHERE src=?');
+    final cosGoal = math.cos(to.latitude * math.pi / 180);
+    var expanded = 0;
     try {
       while (queue.isNotEmpty) {
         final at = queue.removeFirst();
@@ -170,6 +174,7 @@ class _Graph {
           }
           return path.reversed.toList();
         }
+        if (++expanded > 250000) break;
         final edges = <_Link>[...?extra[at.id]];
         if (at.id > 0) {
           for (final row in lookup.select([at.id])) {
@@ -186,16 +191,15 @@ class _Graph {
           costs[e.id] = g;
           prior[e.id] = at.id;
           positions[e.id] = e.point;
-          queue.add((id: e.id, g: g, f: g + projectionDistance(e.point, to)));
+          final dy = e.point.latitude - to.latitude;
+          final dx = deltaLon(e.point.longitude, to.longitude) * cosGoal;
+          final h = math.sqrt(dx * dx + dy * dy) * 110500;
+          queue.add((id: e.id, g: g, f: g + h));
         }
       }
     } finally {
       lookup.close();
     }
-    throw StateError(
-      'No connected driving route. You can still follow the saved trail.',
-    );
+    throw StateError('No connected driving route between these points.');
   }
-
-  double projectionDistance(LatLng a, LatLng b) => meters(a, b) * .98;
 }

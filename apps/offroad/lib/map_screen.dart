@@ -16,6 +16,7 @@ import 'package:offroad_storage/navigation.dart';
 import 'package:offroad_storage/road_index.dart';
 
 import 'main.dart';
+import 'navigation_ui.dart';
 import 'position_panel.dart';
 import 'trail_session.dart';
 
@@ -75,8 +76,11 @@ class _MapScreenState extends ConsumerState<MapScreen>
   Timer? roadsTimer;
   int cameraGeneration = 0;
   int _satEpoch = 0;
-  String? activeTrailId, activeName, snapNote;
-  LatLng? snapPoint;
+  String? activeTrailId, activeName, snapNote, pickingNav;
+  LatLng? snapPoint, navStart, navDest, rerouteGoal;
+  String navStartLabel = 'My location', navDestLabel = '';
+  bool navUseGpsStart = true;
+  final EtaEstimator eta = EtaEstimator();
   PathPart? activePath, approachTo;
   List<PathPart>? reviewedRaw, reviewedSnapped;
   List<PathPart>? get reviewed => connectToRoad ? reviewedSnapped : reviewedRaw;
@@ -104,9 +108,25 @@ class _MapScreenState extends ConsumerState<MapScreen>
     ];
   }
 
+  void _endNavigation() {
+    eta.reset();
+    setState(() {
+      activeTrailId = null;
+      activeName = null;
+      activePath = null;
+      approachTo = null;
+      rerouteGoal = null;
+      navStart = null;
+      navDest = null;
+      navDestLabel = '';
+      offFixes = 0;
+    });
+  }
+
   Future<void> reroute(PositionState s) async {
-    final fix = s.fix, target = approachTo, current = activePath;
-    if (target == null ||
+    final fix = s.fix, target = approachTo, goal = rerouteGoal;
+    final current = activePath;
+    if ((target == null && goal == null) ||
         current == null ||
         fix == null ||
         s.status != FixStatus.live ||
@@ -114,14 +134,14 @@ class _MapScreenState extends ConsumerState<MapScreen>
       return;
     }
     lastGuidanceFix = fix;
+    final here = LatLng(fix.lat, fix.lon);
     // Once on the saved trail, guidance stays on that trail.
-    if (guide(target, LatLng(fix.lat, fix.lon)).offset < 20) {
+    if (target != null && guide(target, here).offset < 20) {
       approachTo = null;
       return;
     }
     final off =
-        guide(current, LatLng(fix.lat, fix.lon)).offset >
-        math.max(30, (fix.accuracy ?? 0) * 1.5);
+        guide(current, here).offset > math.max(30, (fix.accuracy ?? 0) * 1.5);
     offFixes = off ? offFixes + 1 : 0;
     if (!off ||
         offFixes < 3 ||
@@ -133,18 +153,25 @@ class _MapScreenState extends ConsumerState<MapScreen>
     rerouting = true;
     lastReroute = DateTime.now();
     try {
+      final dest = target != null ? target.first : goal!;
       final p = await drivingDirections(
         field!.index,
         field!.trails,
-        LatLng(fix.lat, fix.lon),
-        target.first,
+        here,
+        dest,
       );
-      if (mounted && identical(approachTo, target)) {
-        setState(() => activePath = [...p, ...target.skip(1)]);
+      if (mounted &&
+          ((target != null && identical(approachTo, target)) ||
+              (goal != null && rerouteGoal == goal))) {
+        setState(
+          () => activePath = target != null ? [...p, ...target.skip(1)] : p,
+        );
         toast('Updated driving directions');
       }
     } catch (_) {
-      if (mounted && identical(approachTo, target)) {
+      if (mounted &&
+          ((target != null && identical(approachTo, target)) ||
+              (goal != null && rerouteGoal == goal))) {
         toast(
           'No connected detour from this position. Showing the saved directions.',
         );
@@ -248,6 +275,9 @@ class _MapScreenState extends ConsumerState<MapScreen>
     _positionSub = ref.listenManual(positionProvider, (_, next) {
       final value = next.asData?.value;
       if (value != null) {
+        if (value.status == FixStatus.live) {
+          eta.recordSpeed(value.fix?.speed);
+        }
         _center(value);
         reroute(value);
       }
@@ -340,9 +370,65 @@ class _MapScreenState extends ConsumerState<MapScreen>
     }
   }
 
+  Future<String> _labelForPoint(LatLng pt) async {
+    final session = field;
+    if (session != null) {
+      try {
+        final hit = await session.snapPoint(pt, maxMeters: 80);
+        if (hit != null && hit.roadName.isNotEmpty) {
+          return 'Near ${hit.roadName}';
+        }
+      } catch (_) {}
+    }
+    return '${pt.latitude.toStringAsFixed(4)}, ${pt.longitude.toStringAsFixed(4)}';
+  }
+
+  Future<void> _longPressDestination(LatLng pt) async {
+    final session = field;
+    if (session == null ||
+        session.drawing ||
+        reviewed != null ||
+        picking ||
+        pickingNav != null ||
+        busy) {
+      return;
+    }
+    final dest = LatLng(pt.latitude, FijiStarter.longitude(pt.longitude));
+    final label = await _labelForPoint(dest);
+    if (!mounted) return;
+    setState(() {
+      navDest = dest;
+      navDestLabel = label;
+      if (navStart == null) {
+        navUseGpsStart = true;
+        navStartLabel = 'My location';
+      }
+    });
+    await openNavigate();
+  }
+
   Future<void> _pick(LatLng pt) async {
     final session = field;
     if (reviewed != null) return;
+    if (pickingNav != null && session != null) {
+      final which = pickingNav!;
+      final chosen = LatLng(pt.latitude, FijiStarter.longitude(pt.longitude));
+      final label = await _labelForPoint(chosen);
+      if (!mounted) return;
+      setState(() {
+        pickingNav = null;
+        if (which == 'A') {
+          navUseGpsStart = false;
+          navStart = chosen;
+          navStartLabel = label;
+        } else {
+          navDest = chosen;
+          navDestLabel = label;
+        }
+      });
+      await openNavigate();
+      return;
+    }
     if (session != null && session.drawing) {
       if (busy) return;
       var nextPt = LatLng(pt.latitude, FijiStarter.longitude(pt.longitude));
@@ -491,7 +577,11 @@ class _MapScreenState extends ConsumerState<MapScreen>
           ],
         ),
       if (userPolylines.isNotEmpty) PolylineLayer(polylines: userPolylines),
-      if (session.draft.isNotEmpty || nav != null || snapPoint != null)
+      if (session.draft.isNotEmpty ||
+          nav != null ||
+          snapPoint != null ||
+          navStart != null ||
+          navDest != null)
         MarkerLayer(
           markers: [
             if (snapPoint != null && session.drawing)
@@ -513,7 +603,35 @@ class _MapScreenState extends ConsumerState<MapScreen>
                   color: Colors.deepOrange,
                 ),
               ),
-            if (nav != null)
+            if (navStart != null)
+              Marker(
+                point: navStart!,
+                width: 28,
+                height: 28,
+                child: const CircleAvatar(
+                  backgroundColor: Color(0xff1b6b3a),
+                  foregroundColor: Colors.white,
+                  child: Text(
+                    'A',
+                    style: TextStyle(fontWeight: FontWeight.w800, fontSize: 13),
+                  ),
+                ),
+              ),
+            if (navDest != null)
+              Marker(
+                point: navDest!,
+                width: 28,
+                height: 28,
+                child: const CircleAvatar(
+                  backgroundColor: Color(0xffc62828),
+                  foregroundColor: Colors.white,
+                  child: Text(
+                    'B',
+                    style: TextStyle(fontWeight: FontWeight.w800, fontSize: 13),
+                  ),
+                ),
+              )
+            else if (nav != null)
               Marker(
                 point: nav.last,
                 child: const Icon(Icons.flag, color: Color(0xff005aba)),
@@ -1113,11 +1231,15 @@ class _MapScreenState extends ConsumerState<MapScreen>
       if (!mounted) return;
       path = [...approach, ...p.skip(1)];
     }
+    eta.reset();
     setState(() {
       activeTrailId = selected.id;
       activeName = selected.name;
       activePath = path;
       approachTo = choice.endsWith('/drive') ? p : null;
+      rerouteGoal = null;
+      navStart = null;
+      navDest = null;
       offFixes = 0;
       follow = false;
       compass = false;
@@ -1128,60 +1250,422 @@ class _MapScreenState extends ConsumerState<MapScreen>
     }
   }
 
-  Widget trailBar(PositionState state) {
-    final s = field!, nav = activePath;
-    final fix = state.fix;
-    final valid =
-        (state.status == FixStatus.live || state.status == FixStatus.manual) &&
-        fix != null;
-    String guidance = '';
-    if (nav != null) {
-      if (!valid) {
-        guidance = 'Waiting for a position';
+  Future<void> openNavigate() async {
+    final s = field;
+    if (s == null) return;
+    PathPart? previewPath;
+    String? routeError;
+    bool computing = false;
+    int calcId = 0;
+
+    LatLng? resolveStart() {
+      if (navUseGpsStart) {
+        final st = ref.read(trackerProvider).state;
+        final fix = st.fix;
+        if (fix != null &&
+            (st.status == FixStatus.live || st.status == FixStatus.manual)) {
+          return LatLng(fix.lat, fix.lon);
+        }
+        return null;
+      }
+      return navStart;
+    }
+
+    final result = await showModalBottomSheet<String>(
+      context: context,
+      isScrollControlled: true,
+      showDragHandle: true,
+      builder: (ctx) {
+        bool startedCalc = false;
+        return StatefulBuilder(
+          builder: (ctx, redraw) {
+            Future<void> compute() async {
+              final startPt = resolveStart();
+              final destPt = navDest;
+              final id = ++calcId;
+              if (startPt == null || destPt == null) {
+                redraw(() {
+                  previewPath = null;
+                  routeError = null;
+                  computing = false;
+                });
+                return;
+              }
+              redraw(() {
+                computing = true;
+                routeError = null;
+              });
+              try {
+                final routed = await drivingDirections(
+                  s.index,
+                  s.trails,
+                  startPt,
+                  destPt,
+                );
+                if (ctx.mounted && id == calcId) {
+                  redraw(() {
+                    previewPath = routed;
+                    routeError = null;
+                    computing = false;
+                  });
+                }
+              } catch (e) {
+                if (ctx.mounted && id == calcId) {
+                  redraw(() {
+                    previewPath = null;
+                    routeError = e.toString().replaceFirst('Bad state: ', '');
+                    computing = false;
+                  });
+                }
+              }
+            }
+
+            if (!startedCalc) {
+              startedCalc = true;
+              Future.microtask(compute);
+            }
+
+            final startPt = resolveStart();
+            final destPt = navDest;
+            final previewLen = previewPath == null
+                ? null
+                : lengthOf(previewPath!);
+            final previewEta = previewLen == null
+                ? null
+                : eta.estimate(previewLen);
+
+            return SafeArea(
+              child: Padding(
+                padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    Row(
+                      children: [
+                        Expanded(
+                          child: Text(
+                            'Navigate A → B',
+                            style: Theme.of(ctx).textTheme.titleLarge,
+                          ),
+                        ),
+                        IconButton(
+                          tooltip: 'Swap A and B',
+                          onPressed:
+                              (startPt == null && destPt == null) || computing
+                              ? null
+                              : () {
+                                  final oldStart = startPt;
+                                  final oldStartLabel = navUseGpsStart
+                                      ? 'My location'
+                                      : navStartLabel;
+                                  setState(() {
+                                    navUseGpsStart = false;
+                                    navStart = destPt;
+                                    navStartLabel = destPt == null
+                                        ? 'Choose start'
+                                        : navDestLabel;
+                                    navDest = oldStart;
+                                    navDestLabel = oldStart == null
+                                        ? ''
+                                        : oldStartLabel;
+                                  });
+                                  compute();
+                                },
+                          icon: const Icon(Icons.swap_vert),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 8),
+                    // Point A (Start)
+                    Card(
+                      margin: EdgeInsets.zero,
+                      child: Padding(
+                        padding: const EdgeInsets.all(10),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Row(
+                              children: [
+                                const CircleAvatar(
+                                  radius: 12,
+                                  backgroundColor: Color(0xff1b6b3a),
+                                  foregroundColor: Colors.white,
+                                  child: Text(
+                                    'A',
+                                    style: TextStyle(
+                                      fontSize: 12,
+                                      fontWeight: FontWeight.w800,
+                                    ),
+                                  ),
+                                ),
+                                const SizedBox(width: 8),
+                                Expanded(
+                                  child: Text(
+                                    navUseGpsStart
+                                        ? (startPt != null
+                                              ? 'My GPS location'
+                                              : 'My GPS location (waiting for fix)')
+                                        : navStartLabel,
+                                    style: const TextStyle(
+                                      fontWeight: FontWeight.w600,
+                                    ),
+                                  ),
+                                ),
+                              ],
+                            ),
+                            const SizedBox(height: 6),
+                            Wrap(
+                              spacing: 6,
+                              runSpacing: 4,
+                              children: [
+                                OutlinedButton.icon(
+                                  onPressed: () async {
+                                    setState(() {
+                                      navUseGpsStart = true;
+                                      navStart = null;
+                                      navStartLabel = 'My location';
+                                    });
+                                    if (resolveStart() == null && !desktop) {
+                                      await ref.read(trackerProvider).start();
+                                    }
+                                    await compute();
+                                  },
+                                  icon: const Icon(Icons.my_location, size: 16),
+                                  label: const Text('My GPS'),
+                                ),
+                                OutlinedButton.icon(
+                                  onPressed: () => Navigator.pop(ctx, 'pickA'),
+                                  icon: const Icon(
+                                    Icons.touch_app_outlined,
+                                    size: 16,
+                                  ),
+                                  label: const Text('Pick on map'),
+                                ),
+                                OutlinedButton.icon(
+                                  onPressed: () async {
+                                    final hit = await showOfflinePlaceSearch(
+                                      ctx,
+                                      title: 'Choose start (Point A)',
+                                      indexPath: s.index,
+                                      savedTrails: s.trails,
+                                      near: startPt ?? map.camera.center,
+                                    );
+                                    if (hit != null && mounted) {
+                                      setState(() {
+                                        navUseGpsStart = false;
+                                        navStart = hit.point;
+                                        navStartLabel = hit.name;
+                                      });
+                                      await compute();
+                                    }
+                                  },
+                                  icon: const Icon(Icons.search, size: 16),
+                                  label: const Text('Search'),
+                                ),
+                              ],
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                    const SizedBox(height: 8),
+                    // Point B (Destination)
+                    Card(
+                      margin: EdgeInsets.zero,
+                      child: Padding(
+                        padding: const EdgeInsets.all(10),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Row(
+                              children: [
+                                const CircleAvatar(
+                                  radius: 12,
+                                  backgroundColor: Color(0xffc62828),
+                                  foregroundColor: Colors.white,
+                                  child: Text(
+                                    'B',
+                                    style: TextStyle(
+                                      fontSize: 12,
+                                      fontWeight: FontWeight.w800,
+                                    ),
+                                  ),
+                                ),
+                                const SizedBox(width: 8),
+                                Expanded(
+                                  child: Text(
+                                    destPt == null
+                                        ? 'Choose destination'
+                                        : navDestLabel,
+                                    style: TextStyle(
+                                      fontWeight: FontWeight.w600,
+                                      color: destPt == null
+                                          ? Theme.of(ctx).hintColor
+                                          : null,
+                                    ),
+                                  ),
+                                ),
+                              ],
+                            ),
+                            const SizedBox(height: 6),
+                            Wrap(
+                              spacing: 6,
+                              runSpacing: 4,
+                              children: [
+                                OutlinedButton.icon(
+                                  onPressed: () => Navigator.pop(ctx, 'pickB'),
+                                  icon: const Icon(
+                                    Icons.touch_app_outlined,
+                                    size: 16,
+                                  ),
+                                  label: const Text('Pick on map'),
+                                ),
+                                OutlinedButton.icon(
+                                  onPressed: () async {
+                                    final hit = await showOfflinePlaceSearch(
+                                      ctx,
+                                      title: 'Choose destination (Point B)',
+                                      indexPath: s.index,
+                                      savedTrails: s.trails,
+                                      near: startPt ?? map.camera.center,
+                                    );
+                                    if (hit != null && mounted) {
+                                      setState(() {
+                                        navDest = hit.point;
+                                        navDestLabel = hit.name;
+                                      });
+                                      await compute();
+                                    }
+                                  },
+                                  icon: const Icon(Icons.search, size: 16),
+                                  label: const Text('Search'),
+                                ),
+                              ],
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                    const SizedBox(height: 10),
+                    if (computing)
+                      const Padding(
+                        padding: EdgeInsets.symmetric(vertical: 8),
+                        child: LinearProgressIndicator(),
+                      )
+                    else if (routeError != null)
+                      Padding(
+                        padding: const EdgeInsets.only(bottom: 8),
+                        child: Text(
+                          routeError!,
+                          style: TextStyle(
+                            color: Theme.of(ctx).colorScheme.error,
+                          ),
+                        ),
+                      )
+                    else if (previewLen != null && previewEta != null)
+                      Padding(
+                        padding: const EdgeInsets.only(bottom: 8),
+                        child: Text(
+                          '${formatDistance(previewLen)} · ~${formatDuration(previewEta.duration)} · ETA ${formatClock(previewEta.arrival)}',
+                          style: const TextStyle(
+                            fontSize: 15,
+                            fontWeight: FontWeight.w700,
+                          ),
+                        ),
+                      )
+                    else
+                      const Padding(
+                        padding: EdgeInsets.only(bottom: 8),
+                        child: Text(
+                          'Tip: you can also long-press anywhere on the map to set Point B.',
+                          style: TextStyle(fontSize: 12),
+                        ),
+                      ),
+                    FilledButton.icon(
+                      onPressed: previewPath == null || computing
+                          ? null
+                          : () => Navigator.pop(ctx, 'start'),
+                      icon: const Icon(Icons.navigation_rounded),
+                      label: const Text('Start navigation'),
+                    ),
+                  ],
+                ),
+              ),
+            );
+          },
+        );
+      },
+    );
+    if (!mounted || result == null) return;
+    if (result == 'pickA' || result == 'pickB') {
+      setState(() {
+        pickingNav = result == 'pickA' ? 'A' : 'B';
+        picking = false;
+        follow = false;
+        compass = false;
+      });
+      return;
+    }
+    if (result == 'start' && previewPath != null && navDest != null) {
+      eta.reset();
+      setState(() {
+        activeTrailId = null;
+        activeName = navDestLabel.isEmpty ? 'Destination' : navDestLabel;
+        activePath = previewPath;
+        approachTo = null;
+        rerouteGoal = navDest;
+        offFixes = 0;
+        follow = navUseGpsStart;
+        zoomOnFix = navUseGpsStart;
+        compass = false;
+      });
+      if (!navUseGpsStart) {
+        showPath(previewPath!);
       } else {
-        final g = guide(nav, LatLng(fix.lat, fix.lon));
-        final angle = g.next < nav.length - 1
-            ? deltaLon(
-                bearing(nav[g.next - 1], nav[g.next]),
-                bearing(nav[g.next], nav[g.next + 1]),
-              )
-            : 0;
-        final turn = angle.abs() < 30
-            ? 'Continue'
-            : angle > 0
-            ? 'Turn right'
-            : 'Turn left';
-        final off = g.offset > math.max(25, (fix.accuracy ?? 0) * 1.5);
-        final eta = fix.speed != null && fix.speed! > 0.7
-            ? ' · ${(g.remaining / fix.speed! / 60).ceil()} min'
-            : '';
-        guidance = g.arrived
-            ? 'Arrived'
-            : off
-            ? 'Off route · ${distance(g.offset)} from trail'
-            : '$turn in ${distance(meters(LatLng(fix.lat, fix.lon), nav[g.next]))} · ${g.bearingDeg.round()}° · ${distance(g.remaining)} left$eta';
+        final st = ref.read(trackerProvider).state;
+        if (st.status == FixStatus.live || st.status == FixStatus.manual) {
+          _center(st);
+        } else {
+          showPath(previewPath!);
+        }
+      }
+      if (!desktop &&
+          ref.read(trackerProvider).state.status != FixStatus.live) {
+        await ref.read(trackerProvider).start();
       }
     }
+  }
+
+  Widget trailBar(PositionState state) {
+    final s = field!, nav = activePath;
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
           if (nav != null)
-            ListTile(
-              dense: true,
-              title: Text(activeName!),
-              subtitle: Text(guidance),
-              trailing: IconButton(
-                tooltip: 'End navigation',
-                icon: const Icon(Icons.close),
-                onPressed: () => setState(() {
-                  activeTrailId = null;
-                  activeName = null;
-                  activePath = null;
-                  approachTo = null;
-                }),
-              ),
+            NavHudBar(
+              destinationName: activeName ?? 'Route',
+              path: nav,
+              state: state,
+              estimator: eta,
+              following: follow,
+              onFollow: () {
+                final live =
+                    state.status == FixStatus.live ||
+                    state.status == FixStatus.manual;
+                if (!live) {
+                  _locate();
+                } else {
+                  setState(() {
+                    follow = true;
+                    zoomOnFix = true;
+                  });
+                  _center(state);
+                }
+              },
+              onEnd: _endNavigation,
             ),
           if (busy) const LinearProgressIndicator(),
           if (reviewed != null)
@@ -1286,13 +1770,19 @@ class _MapScreenState extends ConsumerState<MapScreen>
             Wrap(
               alignment: WrapAlignment.center,
               spacing: 6,
+              runSpacing: 4,
               children: [
+                FilledButton.icon(
+                  onPressed: busy ? null : () => action(openNavigate),
+                  icon: const Icon(Icons.directions),
+                  label: const Text('Navigate'),
+                ),
                 TextButton.icon(
                   onPressed: busy ? null : () => action(openRoutes),
                   icon: const Icon(Icons.route),
                   label: const Text('Routes'),
                 ),
-                FilledButton.icon(
+                OutlinedButton.icon(
                   onPressed: busy
                       ? null
                       : () => setState(() {
@@ -1300,6 +1790,7 @@ class _MapScreenState extends ConsumerState<MapScreen>
                           snapNote = null;
                           snapPoint = null;
                           picking = false;
+                          pickingNav = null;
                           follow = false;
                           compass = false;
                         }),
@@ -1459,6 +1950,7 @@ class _MapScreenState extends ConsumerState<MapScreen>
                             loadRoads(map.camera);
                           },
                           onTap: (_, pt) => _pick(pt),
+                          onLongPress: (_, pt) => _longPressDestination(pt),
                           onPositionChanged: _cameraChanged,
                         ),
                         children: [
@@ -1567,7 +2059,27 @@ class _MapScreenState extends ConsumerState<MapScreen>
                           ),
                         ],
                       ),
-                      if (picking ||
+                      if (activePath != null)
+                        Positioned(
+                          left: 10,
+                          top: 10,
+                          right: 64,
+                          child: Consumer(
+                            builder: (context, ref, _) {
+                              final tracker = ref.watch(trackerProvider);
+                              final state =
+                                  ref.watch(positionProvider).asData?.value ??
+                                  tracker.state;
+                              return NavTurnBanner(
+                                destinationName: activeName ?? 'Destination',
+                                path: activePath!,
+                                state: state,
+                              );
+                            },
+                          ),
+                        )
+                      else if (picking ||
+                          pickingNav != null ||
                           outside ||
                           (session?.drawing == true && reviewed == null))
                         Positioned(
@@ -1580,14 +2092,39 @@ class _MapScreenState extends ConsumerState<MapScreen>
                               color: Theme.of(context).colorScheme.surface,
                               borderRadius: BorderRadius.circular(6),
                               child: Padding(
-                                padding: const EdgeInsets.all(8),
-                                child: Text(
-                                  picking
-                                      ? 'Tap the map to set your position'
-                                      : outside
-                                      ? 'Outside Fiji starter coverage'
-                                      : snapNote ??
-                                            'Tap points along the new route',
+                                padding: const EdgeInsets.symmetric(
+                                  horizontal: 10,
+                                  vertical: 6,
+                                ),
+                                child: Row(
+                                  mainAxisSize: MainAxisSize.min,
+                                  children: [
+                                    Flexible(
+                                      child: Text(
+                                        pickingNav != null
+                                            ? (pickingNav == 'A'
+                                                  ? 'Tap Start (Point A) on map'
+                                                  : 'Tap Destination (Point B) on map')
+                                            : picking
+                                            ? 'Tap the map to set your position'
+                                            : outside
+                                            ? 'Outside Fiji starter coverage'
+                                            : snapNote ??
+                                                  'Tap points along the new route',
+                                      ),
+                                    ),
+                                    if (pickingNav != null) ...[
+                                      const SizedBox(width: 8),
+                                      TextButton(
+                                        onPressed: () =>
+                                            setState(() => pickingNav = null),
+                                        style: TextButton.styleFrom(
+                                          visualDensity: VisualDensity.compact,
+                                        ),
+                                        child: const Text('Cancel'),
+                                      ),
+                                    ],
+                                  ],
                                 ),
                               ),
                             ),
@@ -1707,6 +2244,23 @@ class _MapScreenState extends ConsumerState<MapScreen>
                           ),
                         ),
                       ),
+                      if (activePath == null)
+                        Positioned(
+                          left: 8,
+                          bottom: 32,
+                          child: Consumer(
+                            builder: (context, ref, _) {
+                              final tracker = ref.watch(trackerProvider);
+                              final state =
+                                  ref.watch(positionProvider).asData?.value ??
+                                  tracker.state;
+                              if (state.status != FixStatus.live) {
+                                return const SizedBox.shrink();
+                              }
+                              return LiveSpeedChip(speedMps: state.fix?.speed);
+                            },
+                          ),
+                        ),
                       Positioned(
                         left: 6,
                         bottom: 4,

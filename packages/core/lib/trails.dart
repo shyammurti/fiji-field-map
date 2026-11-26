@@ -183,17 +183,65 @@ List<PathPart> newSections(
   return result;
 }
 
+enum TurnKind {
+  straight,
+  slightLeft,
+  left,
+  sharpLeft,
+  slightRight,
+  right,
+  sharpRight,
+  uTurn,
+  arrive,
+}
+
 class Guidance {
   Guidance(
     this.remaining,
     this.bearingDeg,
     this.offset,
     this.next,
-    this.arrived,
-  );
-  final double remaining, bearingDeg, offset;
+    this.arrived, {
+    this.turn = TurnKind.straight,
+    this.turnDistance = 0,
+  });
+  final double remaining, bearingDeg, offset, turnDistance;
   final int next;
   final bool arrived;
+  final TurnKind turn;
+
+  String get instruction {
+    if (arrived) return 'Arrived';
+    return switch (turn) {
+      TurnKind.arrive => 'Arrive at destination',
+      TurnKind.straight => 'Continue straight',
+      TurnKind.slightLeft => 'Keep left',
+      TurnKind.left => 'Turn left',
+      TurnKind.sharpLeft => 'Sharp left',
+      TurnKind.slightRight => 'Keep right',
+      TurnKind.right => 'Turn right',
+      TurnKind.sharpRight => 'Sharp right',
+      TurnKind.uTurn => 'Make a U-turn',
+    };
+  }
+}
+
+LatLng _pointAlong(PathPart path, int fromIndex, double targetMeters, int dir) {
+  var acc = 0.0;
+  var idx = fromIndex;
+  while (idx + dir >= 0 && idx + dir < path.length) {
+    final seg = meters(path[idx], path[idx + dir]);
+    if (acc + seg >= targetMeters && seg > 0.1) {
+      return interpolate(
+        path[idx],
+        path[idx + dir],
+        (targetMeters - acc) / seg,
+      );
+    }
+    acc += seg;
+    idx += dir;
+  }
+  return path[idx];
 }
 
 Guidance guide(PathPart path, LatLng here) {
@@ -206,12 +254,130 @@ Guidance guide(PathPart path, LatLng here) {
       t = hit.t;
     }
   }
-  var left = (1 - t) * meters(path[index - 1], path[index]);
+  final segLeft = (1 - t) * meters(path[index - 1], path[index]);
+  var left = segLeft;
   for (var i = index + 1; i < path.length; i++) {
     left += meters(path[i - 1], path[i]);
   }
   final arrived = left < 18 && meters(here, path.last) < 18;
-  return Guidance(left, bearing(here, path[index]), best, index, arrived);
+  var turn = TurnKind.arrive;
+  var turnDist = left;
+  if (!arrived) {
+    var distToVertex = segLeft;
+    for (var i = index; i < path.length - 1; i++) {
+      // Sample ~20 m before and after vertex i so tiny road-curve vertices don't trigger false turns.
+      final before = _pointAlong(path, i, 20, -1);
+      final after = _pointAlong(path, i, 20, 1);
+      if (meters(before, path[i]) >= 4 && meters(path[i], after) >= 4) {
+        final angle = deltaLon(
+          bearing(before, path[i]),
+          bearing(path[i], after),
+        );
+        final absAngle = angle.abs();
+        if (absAngle >= 28) {
+          if (absAngle >= 145) {
+            turn = TurnKind.uTurn;
+          } else if (absAngle >= 110) {
+            turn = angle > 0 ? TurnKind.sharpRight : TurnKind.sharpLeft;
+          } else if (absAngle >= 50) {
+            turn = angle > 0 ? TurnKind.right : TurnKind.left;
+          } else {
+            turn = angle > 0 ? TurnKind.slightRight : TurnKind.slightLeft;
+          }
+          turnDist = distToVertex;
+          break;
+        }
+      }
+      distToVertex += meters(path[i], path[i + 1]);
+    }
+    if (turn == TurnKind.arrive && left > 180) {
+      turn = TurnKind.straight;
+    }
+  }
+  return Guidance(
+    left,
+    bearing(here, path[index]),
+    best,
+    index,
+    arrived,
+    turn: turn,
+    turnDistance: turnDist,
+  );
+}
+
+class EtaEstimate {
+  const EtaEstimate({
+    required this.duration,
+    required this.arrival,
+    required this.speedKmh,
+    required this.liveBased,
+  });
+  final Duration duration;
+  final DateTime arrival;
+  final double speedKmh;
+  final bool liveBased;
+}
+
+/// Smooths live GPS speed and computes steady remaining time and arrival clock
+/// ETA, falling back to a realistic Fiji road/track baseline when stationary.
+class EtaEstimator {
+  EtaEstimator({this.baselineMps = 10.0}); // ~36 km/h Fiji mixed road baseline
+  final double baselineMps;
+  double? _smoothedMps;
+
+  void reset() => _smoothedMps = null;
+
+  void recordSpeed(double? speedMps) {
+    if (speedMps == null || !speedMps.isFinite || speedMps < 1.2) return;
+    final clamped = speedMps.clamp(1.2, 36.0);
+    _smoothedMps = _smoothedMps == null
+        ? clamped
+        : _smoothedMps! * 0.72 + clamped * 0.28;
+  }
+
+  EtaEstimate estimate(
+    double remainingMeters, {
+    double? liveSpeedMps,
+    DateTime? now,
+  }) {
+    final kmh =
+        liveSpeedMps != null && liveSpeedMps.isFinite && liveSpeedMps >= 0.4
+        ? liveSpeedMps * 3.6
+        : 0.0;
+    final hasLive = _smoothedMps != null && _smoothedMps! >= 1.5;
+    final effectiveMps = hasLive
+        ? (_smoothedMps! * 0.75 + baselineMps * 0.25)
+        : baselineMps;
+    final seconds = remainingMeters <= 0
+        ? 0
+        : (remainingMeters / effectiveMps).round();
+    final duration = Duration(seconds: seconds);
+    final clock = (now ?? DateTime.now()).add(duration);
+    return EtaEstimate(
+      duration: duration,
+      arrival: clock,
+      speedKmh: kmh,
+      liveBased: hasLive,
+    );
+  }
+}
+
+String formatDuration(Duration d) {
+  final mins = (d.inSeconds / 60).ceil();
+  if (mins <= 0) return '< 1 min';
+  if (mins < 60) return '$mins min';
+  final h = mins ~/ 60;
+  final m = mins % 60;
+  return m == 0 ? '$h hr' : '$h hr $m min';
+}
+
+String formatClock(DateTime dt) {
+  final local = dt.toLocal();
+  final h24 = local.hour;
+  final suffix = h24 >= 12 ? 'PM' : 'AM';
+  final h12 = h24 % 12 == 0 ? 12 : h24 % 12;
+  final mm = local.minute.toString().padLeft(2, '0');
+  return '$h12:$mm $suffix';
 }
 
 /// A gap or poor fix breaks continuity. Never draw a straight segment across it.

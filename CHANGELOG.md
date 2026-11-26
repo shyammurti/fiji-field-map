@@ -2,6 +2,20 @@
 
 All notable changes to **Fiji Field Map** are documented here.
 
+## [0.3.0] - 2026-11-26
+
+### Added
+- **Point A → Point B offline navigation service**:
+  - New **Navigate** button on the main bar opens a Point A → Point B planner with **My GPS**, **Pick on map**, **Offline Search** across all 1,285 named Fiji OSM roads plus saved custom trails, **Swap A ↔ B**, live route preview (distance + ETA), and automatic off-route rerouting.
+  - **Long-press shortcut**: Long-press anywhere on the map to drop Point B and plan directions immediately.
+- **Live Active Speed & ETA HUD**:
+  - High-contrast Google-Maps-style top turn banner scanning ahead along the route for real upcoming turns (`Turn right in 240 m`, `Keep left`, `Off route`, `Arrived`).
+  - Bottom live telemetry bar displaying **Active Speed (`km/h`)**, smoothed **remaining drive time**, **clock arrival ETA** (`3:28 PM`), and remaining distance — with a Fiji road-speed baseline estimate even before moving.
+  - Compact floating **Speedometer badge (`km/h`)** on the map whenever GPS is live outside active navigation.
+- **Faster offline A* routing**: Replaced Vincenty heuristic with a fast admissible equirectangular lower bound, expanded off-road endpoint snapping to 250 m, and added a 250k node cap for instant feedback on disconnected islands.
+
+---
+
 ## [0.2.2] - 2026-11-26
 
 ### Added

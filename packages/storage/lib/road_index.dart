@@ -70,6 +70,79 @@ Future<List<RoadLine>> viewportRoads(
 });
 
 typedef RoadSnap = ({LatLng point, String roadName, double distance});
+typedef PlaceMatch = ({
+  String name,
+  String subtitle,
+  LatLng point,
+  bool isSavedTrail,
+});
+
+/// Searches offline across saved custom trails and all named roads in Fiji.
+Future<List<PlaceMatch>> searchPlaces(
+  String path,
+  String query,
+  List<Trail> saved, {
+  LatLng? near,
+  int limit = 25,
+}) => Isolate.run(() {
+  final q = query.trim().toLowerCase();
+  final matches = <PlaceMatch>[];
+  final seen = <String>{};
+  for (final t in saved) {
+    if (t.parts.isEmpty || t.parts.first.isEmpty) continue;
+    if (q.isEmpty || t.name.toLowerCase().contains(q)) {
+      matches.add((
+        name: t.name,
+        subtitle: 'Saved route',
+        point: t.parts.first.first,
+        isSavedTrail: true,
+      ));
+      seen.add('saved:${t.name.toLowerCase()}');
+    }
+  }
+  final db = sqlite3.open(path, mode: OpenMode.readOnly);
+  try {
+    final rows = q.isEmpty
+        ? db.select(
+            'SELECT name, kind, coords FROM roads WHERE length(name) > 0 GROUP BY name ORDER BY name LIMIT ?',
+            [limit],
+          )
+        : db.select(
+            'SELECT name, kind, coords FROM roads WHERE length(name) > 0 AND lower(name) LIKE ? GROUP BY name LIMIT 60',
+            ['%$q%'],
+          );
+    for (final row in rows) {
+      final name = row['name'] as String;
+      if (!seen.add('road:${name.toLowerCase()}')) continue;
+      final pts = jsonDecode(utf8.decode(zlib.decode(row['coords']))) as List;
+      if (pts.isEmpty) continue;
+      final mid = pts[pts.length ~/ 2] as List;
+      final pt = LatLng(mid[0] / 1e6, (mid[1] / 1e6 + 180) % 360 - 180);
+      final kind = (row['kind'] as String).replaceAll('_', ' ');
+      matches.add((
+        name: name,
+        subtitle: 'Road · $kind',
+        point: pt,
+        isSavedTrail: false,
+      ));
+    }
+  } finally {
+    db.close();
+  }
+  matches.sort((a, b) {
+    if (a.isSavedTrail != b.isSavedTrail) return a.isSavedTrail ? -1 : 1;
+    if (q.isNotEmpty) {
+      final ap = a.name.toLowerCase().startsWith(q);
+      final bp = b.name.toLowerCase().startsWith(q);
+      if (ap != bp) return ap ? -1 : 1;
+    }
+    if (near != null) {
+      return meters(near, a.point).compareTo(meters(near, b.point));
+    }
+    return a.name.toLowerCase().compareTo(b.name.toLowerCase());
+  });
+  return matches.take(limit).toList();
+});
 
 RoadSnap? _findNearest(
   Database db,

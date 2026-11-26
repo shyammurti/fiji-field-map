@@ -143,4 +143,29 @@ void main() {
       expect(meters(connected.single.first, snap.point), lessThan(1));
     },
   );
+  test(
+    'offline searchPlaces finds Fiji OSM roads and saved trails and routes A to B',
+    () async {
+      final saved = [
+        Trail.create('local', 'Sigatoka Ridge Track', [
+          [const LatLng(-18.14, 177.51), const LatLng(-18.142, 177.512)],
+        ]),
+      ];
+      final savedHits = await searchPlaces(index, 'sigatoka ridge', saved);
+      expect(savedHits.first.isSavedTrail, isTrue);
+      expect(savedHits.first.name, 'Sigatoka Ridge Track');
+      final roadA = await searchPlaces(index, 'victoria parade', saved);
+      final roadB = await searchPlaces(index, 'gladstone road', saved);
+      expect(roadA, isNotEmpty);
+      expect(roadB, isNotEmpty);
+      final route = await drivingDirections(
+        index,
+        saved,
+        roadA.first.point,
+        roadB.first.point,
+      );
+      expect(route.length, greaterThan(2));
+      expect(lengthOf(route), greaterThan(100));
+    },
+  );
 }
